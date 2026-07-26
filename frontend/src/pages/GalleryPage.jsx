@@ -1,23 +1,18 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 
 /* ─────────────────────────────────────────────
-   CONFIG  ← put your Cloudinary details here
+   CONFIG
 ───────────────────────────────────────────── */
-const CLOUD_NAME  = 'YOUR_CLOUD_NAME'   // e.g. 'dxyz123abc'
-const UPLOAD_PRESET = 'YOUR_UPLOAD_PRESET' // unsigned preset name
+const API_BASE_URL = 'http://localhost:8080/api'
 
 /* ─────────────────────────────────────────────
    HELPERS
 ───────────────────────────────────────────── */
 function fmtBytes(b) {
-  if (!b) return ''
+  if (!b) return '0 B'
   if (b < 1024) return b + ' B'
   if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB'
   return (b / (1024 * 1024)).toFixed(1) + ' MB'
-}
-
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2)
 }
 
 /* ─────────────────────────────────────────────
@@ -26,13 +21,22 @@ function uid() {
 function CreateFolderModal({ onClose, onCreate }) {
   const [name, setName] = useState('')
   const [err, setErr]   = useState('')
+  const [saving, setSaving] = useState(false)
 
-  const submit = () => {
+  const submit = async () => {
     const t = name.trim()
     if (!t)       { setErr('Folder name is required'); return }
     if (t.length < 2) { setErr('Must be at least 2 characters'); return }
-    onCreate(t)
-    onClose()
+    
+    setSaving(true)
+    try {
+      await onCreate(t)
+      onClose()
+    } catch (e) {
+      setErr('Failed to create folder')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -40,7 +44,7 @@ function CreateFolderModal({ onClose, onCreate }) {
       <div className="modal">
         <div className="modal-head">
           <span className="modal-title">📁 New Folder</span>
-          <button id="close-folder-modal" className="modal-close" onClick={onClose}>✕</button>
+          <button id="close-folder-modal" className="modal-close" onClick={onClose} disabled={saving}>✕</button>
         </div>
 
         <div className="field">
@@ -55,15 +59,16 @@ function CreateFolderModal({ onClose, onCreate }) {
               value={name}
               onChange={e => { setName(e.target.value); setErr('') }}
               onKeyDown={e => e.key === 'Enter' && submit()}
+              disabled={saving}
             />
           </div>
           {err && <span className="field-error">⚡ {err}</span>}
         </div>
 
         <div className="modal-foot">
-          <button className="btn btn-outline" onClick={onClose}>Cancel</button>
-          <button id="create-folder-btn" className="btn btn-grad" onClick={submit}>
-            Create Folder
+          <button className="btn btn-outline" onClick={onClose} disabled={saving}>Cancel</button>
+          <button id="create-folder-btn" className="btn btn-grad" onClick={submit} disabled={saving}>
+            {saving ? <><span className="spin" /> Creating</> : 'Create Folder'}
           </button>
         </div>
       </div>
@@ -72,7 +77,7 @@ function CreateFolderModal({ onClose, onCreate }) {
 }
 
 /* ─────────────────────────────────────────────
-   UPLOAD MODAL  (real Cloudinary upload)
+   UPLOAD MODAL  (real Cloudinary upload + DB save)
 ───────────────────────────────────────────── */
 function UploadModal({ onClose, folders, activeFolderId, onUploaded }) {
   const [drag, setDrag]             = useState(false)
@@ -102,56 +107,36 @@ function UploadModal({ onClose, folders, activeFolderId, onUploaded }) {
   const handleUpload = async () => {
     if (!file) { setError('Please select an image first'); return }
 
-    if (CLOUD_NAME === 'YOUR_CLOUD_NAME') {
-      // DEMO MODE — no real upload
-      setDone(true)
-      const fakeImg = {
-        id: uid(),
-        url: preview,
-        publicId: 'demo/' + uid(),
-        title: title || file.name,
-        size: file.size,
-        folderId: folderId ? Number(folderId) : null,
-      }
-      onUploaded(fakeImg)
-      setTimeout(onClose, 800)
-      return
-    }
-
-    // ── REAL Cloudinary upload ──
     setUploading(true); setError('')
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('upload_preset', UPLOAD_PRESET)
-    if (title) formData.append('public_id', title.replace(/\s+/g, '_'))
+    if (title) formData.append('title', title)
+    if (folderId) formData.append('folderId', folderId)
 
     const xhr = new XMLHttpRequest()
     xhr.upload.addEventListener('progress', e => {
       if (e.lengthComputable) setProgress(Math.round(e.loaded / e.total * 100))
     })
 
-    xhr.onload = () => {
-      setUploading(false)
+    xhr.onload = async () => {
       if (xhr.status === 200) {
-        const res = JSON.parse(xhr.responseText)
-        const newImg = {
-          id: uid(),
-          url: res.secure_url,
-          publicId: res.public_id,
-          title: title || res.original_filename || 'Image',
-          size: res.bytes,
-          folderId: folderId ? Number(folderId) : null,
+        try {
+          const savedImage = JSON.parse(xhr.responseText)
+          setDone(true)
+          onUploaded(savedImage)
+          setTimeout(onClose, 800)
+        } catch (dbErr) {
+          setError('Failed to process server response.')
+          setUploading(false)
         }
-        setDone(true)
-        onUploaded(newImg)
-        setTimeout(onClose, 800)
       } else {
-        setError('Upload failed. Check your Cloudinary config.')
+        setError('Upload failed. Server error: ' + xhr.status)
+        setUploading(false)
       }
     }
     xhr.onerror = () => { setUploading(false); setError('Network error during upload.') }
 
-    xhr.open('POST', `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`)
+    xhr.open('POST', `${API_BASE_URL}/images/upload`)
     xhr.send(formData)
   }
 
@@ -170,7 +155,7 @@ function UploadModal({ onClose, folders, activeFolderId, onUploaded }) {
         {preview ? (
           <div className="upload-preview">
             <img src={preview} alt="preview" />
-            <button className="preview-remove" onClick={() => { setPreview(null); setFile(null) }}>✕</button>
+            <button className="preview-remove" onClick={() => { setPreview(null); setFile(null) }} disabled={uploading}>✕</button>
           </div>
         ) : (
           <label htmlFor="file-input" style={{ cursor: 'pointer' }}>
@@ -193,13 +178,10 @@ function UploadModal({ onClose, folders, activeFolderId, onUploaded }) {
           </label>
         )}
 
-        <p className="upload-hint">JPG · PNG · GIF · WebP · up to 10 MB</p>
+        <p className="upload-hint">JPG · PNG · GIF · WebP · up to 20 MB</p>
 
         <div className="cloud-badge">
           ☁️ Powered by Cloudinary
-          {CLOUD_NAME === 'YOUR_CLOUD_NAME' && (
-            <span style={{ color: '#fbbf24', marginLeft: 6 }}>⚠️ Demo mode — add your Cloud Name to upload for real</span>
-          )}
         </div>
 
         {/* Progress */}
@@ -220,6 +202,7 @@ function UploadModal({ onClose, folders, activeFolderId, onUploaded }) {
               placeholder="Optional title"
               value={title}
               onChange={e => setTitle(e.target.value)}
+              disabled={uploading}
             />
           </div>
         </div>
@@ -234,6 +217,7 @@ function UploadModal({ onClose, folders, activeFolderId, onUploaded }) {
               className="input"
               value={folderId}
               onChange={e => setFolderId(e.target.value)}
+              disabled={uploading}
             >
               <option value="">📂 No folder (root)</option>
               {folders.map(f => (
@@ -281,35 +265,50 @@ function Lightbox({ image, onClose }) {
 /* ─────────────────────────────────────────────
    MAIN GALLERY PAGE
 ───────────────────────────────────────────── */
-const INIT_FOLDERS = [
-  { id: 1, name: 'Nature',    color: '🌿' },
-  { id: 2, name: 'Travel',    color: '✈️' },
-  { id: 3, name: 'Family',    color: '👨‍👩‍👧' },
-]
-
-const INIT_IMAGES = [
-  { id: 'i1', url: 'https://picsum.photos/seed/px1/600/450', title: 'Golden Sunset',    folderId: 1, size: 245000 },
-  { id: 'i2', url: 'https://picsum.photos/seed/px2/600/450', title: 'Mountain River',   folderId: 1, size: 312000 },
-  { id: 'i3', url: 'https://picsum.photos/seed/px3/600/450', title: 'City at Night',    folderId: 2, size: 198000 },
-  { id: 'i4', url: 'https://picsum.photos/seed/px4/600/450', title: 'Coastal View',     folderId: 2, size: 278000 },
-  { id: 'i5', url: 'https://picsum.photos/seed/px5/600/450', title: 'Cherry Blossoms',  folderId: 3, size: 221000 },
-  { id: 'i6', url: 'https://picsum.photos/seed/px6/600/450', title: 'Forest Trail',     folderId: null, size: 189000 },
-  { id: 'i7', url: 'https://picsum.photos/seed/px7/600/450', title: 'Desert Dunes',     folderId: null, size: 302000 },
-  { id: 'i8', url: 'https://picsum.photos/seed/px8/600/450', title: 'Winter Lake',      folderId: null, size: 261000 },
-]
-
 export default function GalleryPage() {
-  const [folders, setFolders]         = useState(INIT_FOLDERS)
-  const [images,  setImages]          = useState(INIT_IMAGES)
+  const [folders, setFolders]         = useState([])
+  const [images,  setImages]          = useState([])
+  const [loading, setLoading]         = useState(true)
+  const [error, setError]             = useState(null)
+  
   const [activeFolder, setActiveFolder] = useState(null)  // null = All Photos
   const [search, setSearch]           = useState('')
   const [showCreateFolder, setShowCF] = useState(false)
   const [showUpload, setShowUp]       = useState(false)
   const [lightbox, setLightbox]       = useState(null)
 
+  // Fetch data on mount
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true)
+        const [foldersRes, imagesRes] = await Promise.all([
+          fetch(`${API_BASE_URL}/folders`),
+          fetch(`${API_BASE_URL}/images`)
+        ])
+        
+        if (!foldersRes.ok || !imagesRes.ok) throw new Error('Failed to fetch data')
+        
+        const foldersData = await foldersRes.json()
+        const imagesData = await imagesRes.json()
+        
+        setFolders(foldersData)
+        setImages(imagesData)
+      } catch (err) {
+        console.error(err)
+        setError('Could not connect to the server. Is Spring Boot running?')
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchData()
+  }, [])
+
   /* derived */
   const visibleImages = images.filter(img => {
-    const folderMatch = activeFolder === null ? true : img.folderId === activeFolder
+    // If the image has a folder, the ID is stored in img.folder.id, otherwise img.folder is null
+    const imgFolderId = img.folder ? img.folder.id : null
+    const folderMatch = activeFolder === null ? true : imgFolderId === activeFolder
     const searchMatch = !search || img.title.toLowerCase().includes(search.toLowerCase())
     return folderMatch && searchMatch
   })
@@ -318,32 +317,118 @@ export default function GalleryPage() {
     ? 'All Photos'
     : folders.find(f => f.id === activeFolder)?.name ?? 'Folder'
 
-  const imagesInFolder = fid => images.filter(i => i.folderId === fid).length
+  const imagesInFolder = fid => images.filter(i => (i.folder?.id) === fid).length
 
   /* actions */
-  const createFolder = name => {
-    setFolders(fs => [...fs, { id: Date.now(), name, color: '📁' }])
+  const createFolder = async (name) => {
+    const res = await fetch(`${API_BASE_URL}/folders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, color: '📁' })
+    })
+    if (!res.ok) throw new Error('Failed')
+    const newFolder = await res.json()
+    setFolders(fs => [...fs, newFolder])
   }
 
-  const deleteFolder = (e, fid) => {
+  const deleteFolder = async (e, fid) => {
     e.stopPropagation()
     if (!window.confirm('Delete this folder? Images inside will move to root.')) return
-    setFolders(fs => fs.filter(f => f.id !== fid))
-    setImages(imgs => imgs.map(i => i.folderId === fid ? { ...i, folderId: null } : i))
-    if (activeFolder === fid) setActiveFolder(null)
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/folders/${fid}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error('Failed to delete')
+      
+      setFolders(fs => fs.filter(f => f.id !== fid))
+      setImages(imgs => imgs.map(i => i.folder?.id === fid ? { ...i, folder: null } : i))
+      if (activeFolder === fid) setActiveFolder(null)
+    } catch (err) {
+      alert('Error deleting folder')
+    }
   }
 
   const onUploaded = useCallback(img => {
     setImages(imgs => [img, ...imgs])
   }, [])
 
-  const deleteImage = (e, id) => {
+  const deleteImage = async (e, id) => {
     e.stopPropagation()
-    if (!window.confirm('Delete this image?')) return
-    setImages(imgs => imgs.filter(i => i.id !== id))
+    if (!window.confirm('Delete this image from database and Cloudinary?')) return
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/images/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error('Failed to delete')
+      
+      setImages(imgs => imgs.filter(i => i.id !== id))
+    } catch (err) {
+      alert('Error deleting image')
+    }
   }
 
-  const totalSize = images.reduce((s, i) => s + (i.size || 0), 0)
+  const renameFolder = async (e, f) => {
+    e.stopPropagation()
+    const newName = window.prompt('Enter new folder name:', f.name)
+    if (!newName || newName.trim() === '' || newName === f.name) return
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/folders/${f.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName.trim() })
+      })
+      if (!res.ok) throw new Error('Failed to rename folder')
+      
+      const updatedFolder = await res.json()
+      setFolders(fs => fs.map(folder => folder.id === f.id ? updatedFolder : folder))
+    } catch (err) {
+      alert('Error renaming folder')
+    }
+  }
+
+  const renameImage = async (e, img) => {
+    e.stopPropagation()
+    const newTitle = window.prompt('Enter new image title:', img.title)
+    if (!newTitle || newTitle.trim() === '' || newTitle === img.title) return
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/images/${img.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle.trim() })
+      })
+      if (!res.ok) throw new Error('Failed to rename image')
+      
+      const updatedImage = await res.json()
+      setImages(imgs => imgs.map(i => i.id === img.id ? updatedImage : i))
+    } catch (err) {
+      alert('Error renaming image')
+    }
+  }
+
+  const totalSize = images.reduce((s, i) => s + (i.sizeBytes || 0), 0)
+
+  if (loading) {
+    return (
+      <div className="layout" style={{ alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+          <div className="spin" style={{ width: 40, height: 40 }} />
+          <div style={{ color: 'var(--text2)' }}>Loading Gallery...</div>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="layout" style={{ alignItems: 'center', justifyContent: 'center' }}>
+        <div className="alert alert-err" style={{ maxWidth: 400, textAlign: 'center', display: 'block' }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>🔌</div>
+          <h3 style={{ marginBottom: 8, color: '#fff' }}>Connection Error</h3>
+          {error}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="layout">
@@ -405,6 +490,15 @@ export default function GalleryPage() {
                 onClick={e => deleteFolder(e, f.id)}
                 onKeyDown={e => e.key === 'Enter' && deleteFolder(e, f.id)}
               >✕</span>
+              <span
+                role="button"
+                tabIndex={0}
+                className="folder-del"
+                style={{ right: 30 }}
+                title="Rename folder"
+                onClick={e => renameFolder(e, f)}
+                onKeyDown={e => e.key === 'Enter' && renameFolder(e, f)}
+              >✏️</span>
             </button>
           ))}
 
@@ -516,6 +610,15 @@ export default function GalleryPage() {
                       onClick={e => deleteFolder(e, f.id)}
                       onKeyDown={e => e.key === 'Enter' && deleteFolder(e, f.id)}
                     >✕</span>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      className="fc-del"
+                      style={{ right: 36 }}
+                      title="Rename folder"
+                      onClick={e => renameFolder(e, f)}
+                      onKeyDown={e => e.key === 'Enter' && renameFolder(e, f)}
+                    >✏️</span>
                     <span className="fc-icon">📁</span>
                     <div className="fc-name">{f.name}</div>
                     <div className="fc-meta">{imagesInFolder(f.id)} images</div>
@@ -594,6 +697,11 @@ export default function GalleryPage() {
                       onClick={() => setLightbox(img)}
                     >🔍</button>
                     <button
+                      className="img-act-btn edit"
+                      title="Rename"
+                      onClick={e => renameImage(e, img)}
+                    >✏️</button>
+                    <button
                       id={`del-${img.id}`}
                       className="img-act-btn del"
                       title="Delete"
@@ -602,7 +710,7 @@ export default function GalleryPage() {
                   </div>
                   <div className="img-footer">
                     <span className="img-title">{img.title}</span>
-                    <span className="img-size">{fmtBytes(img.size)}</span>
+                    <span className="img-size">{fmtBytes(img.sizeBytes)}</span>
                   </div>
                 </div>
               ))}
